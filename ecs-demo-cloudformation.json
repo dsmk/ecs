@@ -1,0 +1,364 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Parameters" : {
+    "KeyName": {
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the ECS instances."
+    },
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Description": "Id of the VPC"
+    },
+    "SubnetID": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Description": "Select a default subnet ID."
+    },    
+    "MaxSize": {
+      "Type": "Number",
+      "Default" : "3",
+      "Description": "Maximum number of instances that can be launched in your ECS cluster."
+    },
+    "InstanceType" : {
+      "Description" : "The EC2 instance type",
+      "Type" : "String",
+      "Default" : "t2.micro",
+      "AllowedValues" : [ "t2.micro" ],
+      "ConstraintDescription" : "You can specify only t2.mirco."
+    },
+    "SSHLocation" : {
+      "Description" : " The IP address range that can be used to SSH to the EC2 instances.",
+      "Type": "String",
+      "MinLength": "9",
+      "MaxLength": "18",
+      "Default": "0.0.0.0/0",
+      "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription": "must be a valid IP CIDR range of the form x.x.x.x/x."
+    }
+  },
+
+  "Mappings" : {
+    "AWSRegionToAMI" : {
+      "us-east-1"      : { "AMIID" : "ami-55870742" },
+      "us-west-1"      : { "AMIID" : "ami-07713767" },
+      "us-west-2"      : { "AMIID" : "ami-241bd844" },
+      "eu-west-1"      : { "AMIID" : "ami-c74127b4" },
+      "eu-central-1"   : { "AMIID" : "ami-3b54be54" },
+      "ap-northeast-1" : { "AMIID" : "ami-2b08f44a" },
+      "ap-southeast-1" : { "AMIID" : "ami-6b61bc08" },
+      "ap-southeast-2" : { "AMIID" : "ami-d5b59eb6" }
+    }
+  },
+
+  "Resources" : {
+    "ECSCluster": {
+      "Type": "AWS::ECS::Cluster"
+    },   
+    "ECSAutoScalingGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "VPCZoneIdentifier" : { "Ref" : "SubnetID" },
+        "LaunchConfigurationName" : { "Ref" : "ContainerInstances" },
+        "MinSize" : "1",
+        "MaxSize" : { "Ref" : "MaxSize" }
+      },
+      "CreationPolicy" : {
+        "ResourceSignal" : {
+          "Timeout" : "PT15M"
+        }
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "1",
+          "MaxBatchSize": "1",
+          "PauseTime" : "PT15M",
+          "WaitOnResourceSignals": "true"
+        }
+      }
+    },    
+    "ContainerInstances": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+          
+            "commands" : {
+              "01_add_instance_to_cluster" : {
+                "command" : { "Fn::Join": [ "", [ "#!/bin/bash\n", "echo ECS_CLUSTER=", { "Ref": "ECSCluster" }, " >> /etc/ecs/ecs.config" ] ] }
+              }
+            },
+            
+            "files" : {
+              "/etc/cfn/cfn-hup.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "[main]\n",
+                  "stack=", { "Ref" : "AWS::StackId" }, "\n",
+                  "region=", { "Ref" : "AWS::Region" }, "\n"
+                ]]},
+                "mode"    : "000400",
+                "owner"   : "root",
+                "group"   : "root"
+              },
+              "/etc/cfn/hooks.d/cfn-auto-reloader.conf" : {
+                "content": { "Fn::Join" : ["", [
+                  "[cfn-auto-reloader-hook]\n",
+                  "triggers=post.update\n",
+                  "path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init\n",
+                  "action=/opt/aws/bin/cfn-init -v ",
+                  "         --stack ", { "Ref" : "AWS::StackName" },
+                  "         --resource ContainerInstances ",
+                  "         --region ", { "Ref" : "AWS::Region" }, "\n",
+                  "runas=root\n"
+                ]]}
+              }
+            },
+
+            "services" : {
+              "sysvinit" : {
+                "cfn-hup" : { "enabled" : "true", "ensureRunning" : "true", "files" : ["/etc/cfn/cfn-hup.conf", "/etc/cfn/hooks.d/cfn-auto-reloader.conf"] }
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId" : { "Fn::FindInMap" : [ "AWSRegionToAMI", { "Ref" : "AWS::Region" }, "AMIID" ] },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "SecurityGroups": [{ "Ref": "EcsSecurityGroup" }],
+        "IamInstanceProfile": { "Ref": "EC2InstanceProfile" },
+        "KeyName"        : { "Ref" : "KeyName" },
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+             "#!/bin/bash -xe\n",
+             "yum install -y aws-cfn-bootstrap\n",
+
+             "/opt/aws/bin/cfn-init -v ",
+             "         --stack ", { "Ref" : "AWS::StackName" },
+             "         --resource ContainerInstances ",
+             "         --region ", { "Ref" : "AWS::Region" }, "\n",
+
+             "/opt/aws/bin/cfn-signal -e $? ",
+             "         --stack ", { "Ref" : "AWS::StackName" },
+             "         --resource ECSAutoScalingGroup ",
+             "         --region ", { "Ref" : "AWS::Region" }, "\n"
+        ]]}}
+      }
+    },    
+  
+    "EcsSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Allow ALB to access high ports on ECS cluster nodes",
+        "VpcId" : {"Ref" : "VpcId"},
+        "SecurityGroupIngress" : [{
+          "IpProtocol" : "tcp",
+          "FromPort" : "1025",
+          "ToPort" : "65535",
+          "SourceSecurityGroupId": { "Ref": "AlbSecurityGroup" }
+        }]
+      }
+    },
+
+
+    "AlbSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Allow http to client host",
+        "VpcId" : {"Ref" : "VpcId"},
+        "SecurityGroupIngress" : [{
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        }]
+      }
+    },
+
+    "loadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Scheme": "internet-facing",
+        "Subnets": { "Ref": "SubnetID" },
+        "LoadBalancerAttributes": [
+          {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "50"
+          }
+        ],
+        "SecurityGroups": [{ "Ref": "AlbSecurityGroup" }]
+      }
+    },
+ 
+    "Listener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": {
+              "Ref": "TargetGroup"
+            }
+          }
+        ],
+        "LoadBalancerArn": {
+          "Ref": "loadBalancer"
+        },
+        "Port": "80",
+        "Protocol": "HTTP"
+      }
+    },
+
+    "TargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "HealthCheckIntervalSeconds": 5,
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckTimeoutSeconds": 3,
+        "HealthyThresholdCount": 4,
+        "Matcher": {
+          "HttpCode": "200"
+        },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "TargetGroupAttributes": [
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "20"
+          }
+        ],
+        "Targets": [
+        ],
+        "UnhealthyThresholdCount": 3,
+        "VpcId": {
+          "Ref": "VpcId"
+        }
+      }
+    },
+  
+
+
+
+
+    "EC2Role": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "ecs-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecs:CreateCluster",
+                    "ecs:DeregisterContainerInstance",
+                    "ecs:DiscoverPollEndpoint",
+                    "ecs:Poll",
+                    "ecs:RegisterContainerInstance",
+                    "ecs:StartTelemetrySession",
+                    "ecs:Submit*",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },    
+    "EC2InstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "EC2Role"
+          }
+        ]
+      }
+    },
+
+    "MemoryReservationScaleUpPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "ECSAutoScalingGroup" },
+        "Cooldown" : "300",
+        "ScalingAdjustment" : "1"
+      }
+    },
+    "MemoryReservationAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+          "EvaluationPeriods": "1",
+          "Statistic": "Maximum",
+          "Threshold": "50",
+          "AlarmDescription": "Alarm if CPU too high or metric disappears indicating instance is down",
+          "Period": "60",
+          "AlarmActions": [ { "Ref": "MemoryReservationScaleUpPolicy" } ],
+          "Namespace": "AWS/ECS",
+          "Dimensions": [ {
+            "Name": "ClusterName",
+            "Value": { "Ref": "ECSCluster" }
+          }],
+          "ComparisonOperator": "GreaterThanThreshold",
+          "MetricName": "MemoryReservation"
+      }
+    },
+    "CPUReservationScaleUpPolicy" : {
+      "Type" : "AWS::AutoScaling::ScalingPolicy",
+      "Properties" : {
+        "AdjustmentType" : "ChangeInCapacity",
+        "AutoScalingGroupName" : { "Ref" : "ECSAutoScalingGroup" },
+        "Cooldown" : "300",
+        "ScalingAdjustment" : "1"
+      }
+    },
+    "CPUReservationAlert": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+          "EvaluationPeriods": "1",
+          "Statistic": "Maximum",
+          "Threshold": "50",
+          "AlarmDescription": "Alarm if CPU too high or metric disappears indicating instance is down",
+          "Period": "60",
+          "AlarmActions": [ { "Ref": "CPUReservationScaleUpPolicy" } ],
+          "Namespace": "AWS/ECS",
+          "Dimensions": [ {
+            "Name": "ClusterName",
+            "Value": { "Ref": "ECSCluster" }
+          }],
+          "ComparisonOperator": "GreaterThanThreshold",
+          "MetricName": "CPUReservation"
+      }
+    }     
+  },
+  
+  "Outputs" : {
+    "ecscluster" : {
+      "Value" : { "Ref" : "ECSCluster" }
+    },
+    "TargetGroupArn": {
+      "Value" : { "Ref" : "TargetGroup" }
+    },
+    "ListenerArn": {
+      "Value" : { "Ref" : "Listener" }
+    }
+  }
+}

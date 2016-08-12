@@ -1,0 +1,2 @@
+#!/bin/bash
+echo ECS_CLUSTER=ecs-demo-awscli-ecscluster >> /etc/ecs/ecs.config

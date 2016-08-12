@@ -1,0 +1,64 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Parameters": {
+    "cluster": {
+      "Type": "String",
+      "Description": "Name of the ECS cluster"
+    },
+    "TargetGroupArn": {
+      "Type": "String",
+      "Description": "Name of the default target group"
+    },
+    "ListenerArn": {
+      "Type": "String",
+      "Description": "Name of the ALB listener",
+      "Default": ""
+    },
+    "desiredcount": {
+      "Type": "Number",
+      "Default": "1",
+      "Description": "Number of instances to launch in your ECS cluster."
+    }
+  },
+  "Resources": {
+
+    "WebApp": {
+      "Type": "AWS::ECS::Service",
+      "Properties" : {
+        "Cluster": { "Ref": "cluster" },
+        "DesiredCount": { "Ref": "desiredcount" },
+        "TaskDefinition" : { "Ref":"taskdefinition" },
+        "DeploymentConfiguration": {
+          "MaximumPercent" : 200,
+          "MinimumHealthyPercent" : 75
+        },
+        "Role": "ecsServiceRole",
+        "LoadBalancers": [{
+          "ContainerName" : "AppName",
+          "ContainerPort" : 80,
+          "TargetGroupArn" : { "Ref" : "TargetGroupArn" }
+        }]
+      }
+    },
+    "taskdefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties" : {
+        "ContainerDefinitions" : [
+        {
+          "Name": "AppName",
+          "Image":"nginx",
+          "Cpu": "10",
+          "PortMappings":[
+            {
+              "ContainerPort": 80,
+              "HostPort": 0
+            }
+          ],
+          "Memory":"400",
+          "Essential": "true"
+        }]
+      }
+    }
+
+  }
+}
